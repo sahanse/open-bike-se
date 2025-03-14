@@ -4,14 +4,16 @@ import {ApiError} from "../utils/ApiError.js"
 import {StrictBodyVerify} from "../utils/ReqBodyVerify.js"
 import db from "../db/index.js"
 import {hashPass, comparePass, hashOtp, compareOtp} from "../utils/Bcrypt.js"
-import fs from "fs"
+import fs, { stat } from "fs"
 import jwt from "jsonwebtoken"
 import {uploadOnCloudinary, deleteFromCloudinary} from "../utils/Cloudinary.js"
-import {createToken, createAccessToken} from "../utils/JwtManager.js"
+import {createToken, createAccessToken, resetPass_accesToken} from "../utils/JwtManager.js"
 import {options} from "../utils/Constants.js"
 import {updateQuery} from "pgcrudify"
 import crypto from "crypto"
 import {mailSender} from "../utils/MailManager.js"
+import {authEmailContent} from "../utils/OtpMessage.js"
+import resePassFunc from "../utils/ResetPassManager.js"
 
 const userLocalRegister = asyncHandler(async (req, res) => {
     //make sure user is not logged in
@@ -192,13 +194,7 @@ const userOtpAuth = asyncHandler(async(req, res)=>{
          //send otp to user email
          let emailSubject = 'Your Otp from open-bike-se'
          
-         const emailText = `Dear User,
-Your one-time password (OTP) for verification is: ${otp}
-Please do not share this code with anyone. It is valid for 3 minutes.
-If you did not request this code, please ignore this message.
-Thank you for choosing Open-bike-se.
-Best regards,  
-Team open-bike-se`
+         const emailText = authEmailContent(otp)
 
          const sendOtpEmail = await mailSender(email, emailSubject, emailText);
          if(!sendOtpEmail) throw new ApiError(400, "soemthing went wrong");
@@ -247,8 +243,160 @@ Team open-bike-se`
 });
 
 const resetPassAuth = asyncHandler(async(req, res)=>{
-    console.log("got auth request")
-})
+    const allowedFields =["email", "phone_number", "method", "otp"];
+    
+    const bodyKeys = Object.keys(req.body);
+    if(bodyKeys.length > 2) throw new ApiError(400, "only one filed allowed email, phone")
+    
+    for(let val in req.body){
+        if(allowedFields.includes(val) === false) throw new ApiError(400, `Unknown field ${val}`);
+        if(String(req.body[val]).trim() === "") throw new ApiError(400, `received null value at ${val}`)
+    }
+
+    const {email, phone_number, method, otp} = req.body;
+    let cookieOtpToken = null;
+
+    if(method === "verify" && !otp) throw new ApiError(400, "please provide otp to continue")
+
+    if(bodyKeys.length === 1 && method === "generate"){
+        if(!req.user) throw new ApiError(400, `Please credential or login to continue`);
+        const user_id = req.user.user_id;
+        const cookie_email = req.user.email;
+
+        if(!user_id) throw new ApiError(400, 'something went wrong');
+
+        //get users email from table
+        const get_user_data = await db.query(
+            `SELECT 
+            u.email,
+            r.expiry_at 
+            FROM users u
+            LEFT JOIN reset_pass_otp r 
+            ON u.user_id = r.user_id
+            `
+        );
+      
+        if(get_user_data.rowCount === 0) throw new ApiError(400, 'something went wrong');
+
+        const stored_email = get_user_data.rows[0].email;
+        const stored_expiry = get_user_data.rows[0].expiry_at;
+
+        const resetManager = await resePassFunc(user_id, stored_email, stored_expiry)
+        cookieOtpToken = resetManager
+    }
+
+    if(bodyKeys.length === 2 && method === "generate"){
+        //make sure email or phone is provided
+        if(!email && !phone_number) throw new ApiError(400, "please provide email or phone");
+        const availObj ={}
+        if(email) availObj.email = email;
+        if(phone_number) availObj.phone_number = phone_number;
+
+        let avail_key = null;
+        let avail_val = null;
+        
+        for(let val in availObj){
+           avail_key = val;
+           avail_val = availObj[val]
+        }
+
+        //get users email from table
+        const get_user_data = await db.query(
+            `SELECT
+            u.user_id,
+            u.email,
+            r.expiry_at 
+            FROM users u
+            LEFT JOIN reset_pass_otp r
+            ON u.user_id = r.user_id
+            WHERE u.${avail_key}= $1
+            `,[avail_val]
+        );
+
+        if(get_user_data.rowCount === 0) throw new ApiError(400, "something went wrong")
+
+        const stored_user_id = get_user_data.rows[0].user_id;
+        const stored_email = get_user_data.rows[0].email;
+        const stored_expiry = get_user_data.rows[0].expiry_at;
+
+        const resetManager = await resePassFunc(stored_user_id, stored_email, stored_expiry)
+        cookieOtpToken = resetManager
+    }
+
+    if(bodyKeys.length === 2 && otp && method === "verify"){
+        if(!req.cookies.otpToken) throw new ApiError(400, "Unauthorized access");
+        const otpToken = req.cookies.otpToken;
+        let tokenData =null;
+        try{
+            const decryptedToken = await jwt.verify(otpToken, process.env.OTP_TOKEN_SECRET);
+            tokenData = decryptedToken;
+        }catch(error){
+            res.clearCookie("otpToken");
+            throw new ApiError(400, "Unauthorized access")
+        }
+       const user_id = tokenData.user_id;
+       const unique_id = tokenData.unique_id;
+       const user_otp = otp;
+
+       if(!user_id || !unique_id || !user_otp) throw new ApiError(400, "unauthorized access");
+
+       //comapry otp and unique_id make sure otp is not expired;
+       const getOtpData = await db.query(
+        `SELECT 
+        expiry_at,
+        otp,
+        status
+        FROM reset_pass_otp
+        WHERE user_id = $1 AND unique_id = $2`,[user_id, unique_id]
+       );
+
+       if(getOtpData.rowCount === 0) throw new ApiError(400, "something went wrong");
+       if(getOtpData.rows[0].status === "used") throw new ApiError(400, "unauthorized access")
+
+       const saved_expiry = getOtpData.rows[0].expiry_at;
+       const saved_otp = getOtpData.rows[0].otp;
+
+       //make sure otp is not expired
+       const curr_date = new Date().toISOString();
+       if(new Date(curr_date) > new Date(saved_expiry)) throw new ApiError(400, "otp expired please generate a new one to continue")
+       
+       const otpSame = await compareOtp(String(otp), saved_otp);
+       if(!otpSame) throw new ApiError(400, "wrong otp");
+
+       //useBy time for cookie
+       const useBy_date = new Date(Date.now() + 3 * 60000).toISOString();
+
+       //update the otp status to used
+       const updateStatus = await db.query(
+        `UPDATE
+        reset_pass_otp
+        SET status = $1, use_by = $2 WHERE user_id = $3`,['used', useBy_date, user_id]
+       );
+
+       if(updateStatus.rowCount === 0) throw new ApiError(400,"something went wrong");
+
+       const newTokenData ={
+        user_id:tokenData.user_id,
+        unique_id:tokenData.unique_id,
+        status:"used"
+       }
+     
+       //create new token 
+       const resetRouteToken = await resetPass_accesToken(newTokenData);
+       if(!resetRouteToken) throw new ApiError(400, "something went wrong");
+
+       return res
+       .status(200)
+       .clearCookie("otpToken")
+       .cookie("restPassToken", resetRouteToken, options)
+       .json(new ApiResponse(200, {}, "otp verification successFull"))
+    }
+
+    return res
+    .status(200)
+    .cookie("otpToken", cookieOtpToken, options)
+    .json(new ApiResponse(200, {}, "otp sent successFully"))
+});
 
 const googleRegister = asyncHandler(async(req, res)=>{
     console.log("received login request")
@@ -624,7 +772,62 @@ const update_user_image = asyncHandler(async(req, res)=>{
 });
 
 const reset_pass = asyncHandler(async(req, res)=>{
+    if(!req.cookies.restPassToken) throw new ApiError(400, "unauthorized access");
+
+    const bodyKeys = Object.keys(req.body)
+    if(bodyKeys.length !== 1) throw new ApiError(400, "Please new_password");
+    if(bodyKeys[0] !== "new_password") throw new ApiError(400, "unidetified field")
     
+    for(let val in req.body){
+        if(String(req.body[val]).trim() === "") throw new ApiError(400, "null fields not allowed")
+    }
+
+    //verify reset pass token
+    const verifyToken = await jwt.verify(req.cookies.restPassToken, process.env.RESET_PASS_TOKEN_SECRET);
+    
+    const {user_id, unique_id, status} = verifyToken;
+    const {new_password} = req.body;
+
+    if(!user_id || !unique_id || !status) throw new ApiError(400, "something went wrong")
+   
+    //verify the token data 
+    const verifyTokenData = await db.query(
+        `SELECT 
+        use_by,
+        status 
+        FROM reset_pass_otp
+        WHERE user_id =$1 AND unique_id =$2 AND status =$3`,[user_id, unique_id, status]
+    );
+
+    if(verifyTokenData.rowCount === 0) throw new ApiError(400, "something went wrong");
+
+    //make sure access is not expired
+    const curr_date = new Date().toISOString();
+    const stored_use_by = verifyTokenData.rows[0].use_by;
+    
+    if(new Date(curr_date) > new Date(stored_use_by)) throw new ApiError(400, "Route Validity exprired");
+    
+    //hash the password
+    const hashed_password = await hashPass(new_password);
+  
+    //update password and delete the otp data
+    const resetQuery = await db.query(
+        `WITH update_pass as (
+        UPDATE users 
+        SET password_hash=$1 
+        WHERE user_id = $2
+        )
+        DELETE FROM 
+        reset_pass_otp 
+        WHERE user_id = $2`,[hashed_password, user_id]
+    )
+
+    if(resetQuery.rowCount === 0) throw new ApiError(400, "something went wrong");
+
+    return res
+    .status(200)
+    .clearCookie("restPassToken")
+    .json(new ApiResponse(200, {}, "Password updated successFully"))
 });
 
 export {

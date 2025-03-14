@@ -1,6 +1,6 @@
 import {Router} from "express"
 import { upload } from "../middlewares/multer.middleware.js";
-import {verifyUser} from "../middlewares/Auth.middleware.js"
+import {verifyUser, authUser} from "../middlewares/Auth.middleware.js"
 import {
     user_login, 
     userLocalRegister,
@@ -30,7 +30,7 @@ router.route("/delete-account").delete(verifyUser, delete_account)
 router.route("/update-info").patch(verifyUser, update_info)
 router.route("/update_credential").patch(verifyUser, update_credential)
 router.route("/update_user_image").patch(verifyUser, upload.single("user_image"), update_user_image)
-router.route("/resetPassAuth").post(verifyUser, resetPassAuth)
+router.route("/resetPassAuth").post(authUser,resetPassAuth)
 router.route("/reset-pass").patch(verifyUser, reset_pass)
 
 export default router;
