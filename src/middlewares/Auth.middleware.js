@@ -72,5 +72,36 @@ const authUser = asyncHandler(async(req, _, next)=>{
     }
 });
 
+const verifyRider = asyncHandler(async(req, _, next)=>{
+    try{
+        const access_token = req.cookies?.riderAccessToken || req.header("Authorization").replace("Bearer ", "");
+        if(!access_token) throw new ApiError(400, "unauthorized access")
 
-export {verifyUser, authUser}
+        // //verfiy access Token
+        const verifyToken = await jwt.verify(access_token, process.env.ACCESS_TOKEN_SECRET);
+        const rider_id = verifyToken.rider_id;
+
+        //make sure user exist in db
+        const checkExist = await db.query(
+            `
+            SELECT
+            rider_id,
+            name,
+            email,
+            phone,
+            rider_image
+            FROM riders
+            WHERE rider_id = $1
+            `,[rider_id]
+        )
+        if(checkExist.rowCount === 0) throw new ApiError(400, "unauthorized access")
+        const rider = checkExist.rows[0];
+        req.rider = rider;
+        next()
+    }catch(error){
+        console.log(' middlewares || auth.middleware || verifyUser || error', error);
+        throw new ApiError(400, "unauthorized access")
+    }
+});
+
+export {verifyUser, authUser, verifyRider}
