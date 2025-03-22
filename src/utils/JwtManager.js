@@ -22,22 +22,22 @@ const createToken = async(access_data, refres_data)=>{
     }
 };
 
-const createOtpToken = async(otpData)=>{
-    return jwt.sign(otpData, process.env.OTP_TOKEN_SECRET, {
-        expiresIn:process.env.OTP_TOKEN_EXPIRY
+const authToken = async(otpData)=>{
+    return jwt.sign(otpData, process.env.AUTH_TOKEN_SECRET, {
+        expiresIn:process.env.AUTH_TOKEN_EXPIRY
     })
-}
+};
 
 const resetPass_accesToken = async(tokenData)=>{
     return jwt.sign(tokenData, process.env.RESET_PASS_TOKEN_SECRET, {
         expiresIn:process.env.RESET_PASS_TOKEN_EXPIRY
     })
-}
+};
 
 export {
     createAccessToken, 
     createRefreshToken, 
     createToken, 
-    createOtpToken,
+    authToken,
     resetPass_accesToken
 }

@@ -1,9 +1,8 @@
 import db from "../db/index.js"
 import {mailSender} from "../utils/MailManager.js"
 import crypto from "crypto"
-import {createOtpToken} from "../utils/JwtManager.js"
 import {hashOtp, compareOtp} from "../utils/Bcrypt.js"
-import {authEmailContent} from "../utils/OtpMessage.js"
+
 import {ApiError} from "../utils/ApiError.js"
 
 const resePassFunc = async(user_id, email, expiry)=>{
